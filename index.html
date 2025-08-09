@@ -30,6 +30,26 @@
             max-width: 320px;
             z-index: 5;
         }
+        #controls {
+            margin-top: 8px;
+        }
+        .row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 6px 0;
+        }
+        .row label {
+            min-width: 110px;
+        }
+        .row input[type="range"] {
+            width: 140px;
+        }
+        #fps {
+            margin-top: 8px;
+            font-variant-numeric: tabular-nums;
+            opacity: 0.9;
+        }
         a {
             color: #61dafb;
         }
@@ -43,7 +63,20 @@
         <strong>Black Hole Simulator</strong><br>
         - Drag mouse or a single finger to orbit the camera.<br>
         - Scroll wheel or pinch to zoom.<br>
-        <p>This simulation renders the gravitational lensing of a black hole. It now includes a rocky inner planet and a gas-giant outer planet orbiting the central mass.</p>
+    <p>This simulation renders the gravitational lensing of a black hole. The accretion disk is semi-transparent so you can see planets through it, and its emitted light is bent around the hole.</p>
+    <div id="controls">
+        <div class="row">
+            <label for="mass">Mass</label>
+            <input id="mass" type="range" min="0.1" max="5" step="0.01" value="1.0" />
+            <span id="massVal">1.00</span>
+        </div>
+        <div class="row">
+            <label for="diskRadius">Disk radius</label>
+            <input id="diskRadius" type="range" min="2" max="30" step="0.1" value="8.0" />
+            <span id="diskRadVal">8.0</span>
+        </div>
+        <div id="fps">FPS: --</div>
+    </div>
     </div>
     <canvas id="glcanvas"></canvas>
 
@@ -63,36 +96,35 @@
         uniform float u_time;
         uniform mat4 u_invViewMatrix; 
         uniform vec3 u_cameraPosition;
+    uniform float u_mass;
+    uniform float u_schwarzschildRadius;
+    uniform float u_diskInnerRadius;
+    uniform float u_diskOuterRadius;
 
         // --- Constants ---
         const float PI = 3.14159265359;
-        const int MAX_STEPS = 300; // Increased for larger scene
+    const int MAX_STEPS = 300; // Marching steps for larger scene
         const float MAX_DIST = 100.0;
         const float STEP_SIZE = 0.25; 
         const float EPSILON = 0.001;
 
-        // --- Black Hole Properties ---
-        const float schwarzschildRadius = 1.0; 
-
-        // --- Accretion Disk Properties ---
-        const float diskInnerRadius = schwarzschildRadius * 1.5;
-        const float diskOuterRadius = schwarzschildRadius * 5.0;
-        const float diskHeight = 0.05;
+    // --- Black Hole and Disk Properties (controlled via UI) ---
+    // Use uniforms so they can be adjusted at runtime
+    const float diskHeight = 0.05;
 
         // --- Planet Properties ---
-        const float planet1_orbitRadius = 8.0;
+    const float planet1_orbitRadius = 18.0;
         const float planet1_radius = 0.4;
         const float planet1_speed = 0.1;
         const vec3  planet1_color = vec3(0.8, 0.3, 0.1);
 
-        const float planet2_orbitRadius = 13.0;
+    const float planet2_orbitRadius = 30.0;
         const float planet2_radius = 1.0;
         const float planet2_speed = 0.05;
         const vec3  planet2_color_base = vec3(0.3, 0.4, 0.7);
 
-        // --- Physics ---
-        const float G = 1.0; 
-        const float M = 1.0;
+    // --- Physics ---
+    const float G = 1.0; // scaled units
 
         // --- Utility Functions ---
         float random(vec2 st) {
@@ -108,6 +140,98 @@
             float d = random(i + vec2(1.0, 1.0));
             vec2 u = f * f * (3.0 - 2.0 * f);
             return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+        }
+
+        // --- Procedural Starfield (background) ---
+        // Crisper stars with soft halos and a subtle nebula band.
+        float fbm(vec2 p) {
+            float a = 0.5;
+            float f = 0.0;
+            float sum = 0.0;
+            for (int k = 0; k < 4; k++) {
+                f += a * noise(p);
+                sum += a;
+                p = p * 2.03 + vec2(17.7, 11.3);
+                a *= 0.5;
+            }
+            return (sum > 0.0) ? (f / sum) : 0.0;
+        }
+
+        vec3 starField(vec3 rd, float t) {
+            rd = normalize(rd);
+            // Spherical mapping (longitude/latitude)
+            float lon = atan(rd.z, rd.x); // -PI..PI
+            float lat = asin(clamp(rd.y, -1.0, 1.0)); // -PI/2..PI/2
+            vec2 uv = vec2(lon / (2.0 * PI) + 0.5, lat / PI + 0.5);
+
+            // Star grid resolution controls density (more cells -> more potential stars)
+            const vec2 GRID = vec2(520.0, 260.0);
+            vec2 gUV = uv * GRID;
+            vec2 baseCell = floor(gUV);
+            vec2 f = fract(gUV);
+
+            vec3 color = vec3(0.0);
+
+            // Sample 3x3 neighbor cells for stars near borders
+            for (int j = -1; j <= 1; j++) {
+                for (int i = -1; i <= 1; i++) {
+                    vec2 cid = baseCell + vec2(float(i), float(j));
+                    // Random star position within the cell
+                    vec2 off = vec2(
+                        random(cid + vec2(13.1, 17.7)),
+                        random(cid + vec2(27.3, 39.5))
+                    );
+                    vec2 d = (vec2(float(i), float(j)) + off) - f;
+                    float dist = length(d);
+
+                    // Size distribution: many tiny, few larger (smaller overall for sharper look)
+                    float sizeRnd = random(cid + vec2(3.7, 5.1));
+                    float size = 0.018 + 0.12 * sizeRnd * sizeRnd;
+
+                    // Brightness distribution: heavy-tailed, with rare bright stars
+                    float bRnd = random(cid + vec2(1.3, 2.1));
+                    float baseB = pow(bRnd, 10.0);
+                    float rare = step(0.985, random(cid + vec2(4.2, 7.9)));
+                    baseB += rare * 0.6; // occasional bright pop
+
+                    // Twinkle: subtle temporal modulation per star
+                    float twR = random(cid + vec2(9.2, 6.4));
+                    float tw = 0.88 + 0.22 * sin(t * (5.0 + 11.0 * twR) + twR * 6.28318);
+
+                    // Star profile: sharp core + soft halo
+                    float core = smoothstep(size, 0.0, dist);
+                    core = core * core; // sharpen
+                    float halo = smoothstep(2.5 * size, 0.0, dist) * 0.35;
+                    float starM = core + halo;
+                    float intensity = baseB * starM * tw;
+
+                    // Temperature-based coloration (blue-white to warm)
+                    float temp = random(cid + vec2(2.7, 8.9));
+                    vec3 starCol = mix(vec3(1.0, 0.92, 0.86), vec3(0.75, 0.86, 1.0), temp);
+                    color += intensity * starCol;
+                }
+            }
+
+            // Subtle Milky Way-like band and wispy nebula
+            vec3 galN = normalize(vec3(0.0, 0.2, 1.0));
+            float band = pow(1.0 - abs(dot(rd, galN)), 2.0);
+
+            // Nebula noise with gentle variation, concentrated near the band
+            // Align noise to sky UV to avoid stretching at poles
+            float nebBase = fbm(uv * vec2(8.0, 4.0));
+            float nebDetail = fbm((uv + vec2(0.17, 0.03)) * vec2(16.0, 8.0));
+            float nebMask = smoothstep(0.55, 0.9, band) * smoothstep(0.35, 0.85, nebBase);
+            float neb = clamp(0.0 + 0.9 * nebBase + 0.4 * nebDetail, 0.0, 1.6) * nebMask;
+
+            // Soft color blend for nebula (very subtle)
+            vec3 nebColA = vec3(0.12, 0.16, 0.22);
+            vec3 nebColB = vec3(0.18, 0.12, 0.20);
+            vec3 nebula = mix(nebColA, nebColB, nebDetail) * (0.06 * neb);
+            color += nebula;
+
+            // Gentle tone mapping for the background
+            color = color / (1.0 + color);
+            return color;
         }
 
         /**
@@ -148,85 +272,119 @@
         }
 
         /**
-         * Calculates the color of the accretion disk at a given point in space.
+         * Sample the accretion disk at a point: returns emissive color and alpha.
+         * The disk is modeled as a thin, semi-transparent, glowing plane at y=0 between inner/outer radii.
          */
-        vec3 getDiskColor(vec3 p) {
-            float dist = length(p.xz);
-            vec2 coords = p.xz;
+        vec4 getDiskSample(vec3 p) {
+            // Polar setup (no direct use of angle to avoid seam)
+            vec2 xz = p.xz;
+            float r = length(xz);
+            vec2 e_r = (r > 1e-4) ? xz / r : vec2(1.0, 0.0);
+            vec2 e_t = vec2(-e_r.y, e_r.x);
 
-            float turbulence = noise(coords * 2.0 + u_time * 0.05) * 2.5;
-            float rotation_angle = (1.0 / (dist + 0.2)) * (u_time * -0.3 + turbulence);
-            float s = sin(rotation_angle);
-            float c = cos(rotation_angle);
-            mat2 rotation_matrix = mat2(c, -s, s, c);
+            // Keplerian angular rotation: use thetaFlow to rotate pattern rigidly per-radius
+            float theta = atan(xz.y, xz.x);
+            float omega = 1.6 * pow(max(r, 0.25), -1.5); // angular velocity ~ r^-1.5
+            float thetaFlow = theta - u_time * omega;
 
-            vec2 noise_coord = (rotation_matrix * coords) * 3.0;
-
+            // Seam-free polar noise: use log(r) and sin/cos(thetaFlow)
+            float logr = log(max(r, 0.0007));
             float n = 0.0;
-            n += 1.0 * noise(noise_coord);
-            n += 0.5 * noise(noise_coord * 2.5);
-            n += 0.25 * noise(noise_coord * 5.0);
-            n /= 1.75;
+            n += 1.00 * noise(vec2(logr * 2.7,           sin(thetaFlow)));
+            n += 0.50 * noise(vec2(logr * 5.11 + 17.0,   cos(thetaFlow)));
+            n += 0.25 * noise(vec2(logr * 9.30 - 11.0,   sin(thetaFlow * 2.0)));
+            n = clamp(n / 1.75, 0.0, 1.0);
 
-            float intensity = pow(n, 2.0);
-            vec3 color = vec3(1.0, 0.4, 0.1);
+            // Spiral arm modulation (rotate with thetaFlow to remain stable)
+            float arms = 3.0; // number of arms
+            float pitch = 4.0; // spiral tightness
+            float spiralPhase = arms * (thetaFlow + log(max(r, 0.0005)) * pitch);
+            float armMask = pow(0.5 + 0.5 * cos(spiralPhase), 2.0);
+            // Blend arm contrast stronger inside, softer outside
+            float radial = smoothstep(u_diskInnerRadius, u_diskOuterRadius, r);
+            float armGain = mix(1.35, 1.1, radial);
+            float intensity = pow(n, 1.5) * armGain * mix(0.7, 1.2, armMask) * (1.15 - 0.65 * radial);
 
-            float angle = atan(p.z, p.x);
-            float doppler = sin(angle * 3.0 + dist * 0.5) * 0.1;
-            color.r += doppler;
-            color.b -= doppler;
+            // Temperature/brightness gradient (hot inner -> warm outer)
+            vec3 colInner = vec3(0.98, 0.98, 1.0);   // blue-white hot
+            vec3 colMid   = vec3(1.0, 0.85, 0.55);   // golden
+            vec3 colOuter = vec3(1.0, 0.55, 0.22);   // warm orange
+            vec3 color = mix(colInner, colMid, smoothstep(0.0, 0.6, radial));
+            color = mix(color, colOuter, smoothstep(0.4, 1.0, radial));
 
-            float falloff = 1.0 - smoothstep(diskInnerRadius, diskOuterRadius, dist);
-            return color * intensity * 2.5 * falloff;
+            // Doppler tint from local orbital velocity relative to view
+            float v = 0.8 * pow(max(r, 0.25), -0.5); // orbital speed ~ r^-0.5
+            vec3 velDir3 = normalize(vec3(-p.z, 0.0, p.x));
+            vec3 viewDir = normalize(u_cameraPosition - p);
+            float dop = clamp(dot(velDir3, viewDir) * v, -1.0, 1.0);
+            color.r *= (1.0 - 0.35 * max(dop, 0.0));
+            color.b *= (1.0 + 0.55 * max(-dop, 0.0));
+
+            // Emissive and alpha with radial falloff
+            float falloff = 1.0 - smoothstep(u_diskInnerRadius, u_diskOuterRadius, r);
+            vec3 emissive = color * intensity * (2.2 + 1.3 * (1.0 - radial)) * falloff;
+            float baseAlpha = 0.33;
+            float alpha = baseAlpha * falloff * clamp(intensity * (1.1 + 0.4 * (1.0 - radial)), 0.1, 1.0);
+            return vec4(emissive, alpha);
         }
         
         /**
          * Main ray marching function with planet detection.
          */
-        vec3 rayMarch(vec3 rayOrigin, vec3 rayDir) {
-            vec3 finalColor = vec3(0.0);
+    vec3 rayMarch(vec3 rayOrigin, vec3 rayDir) {
+            vec3 accColor = vec3(0.0); // accumulated color along the ray
+            float transmittance = 1.0; // remaining transparency (1 means fully visible background)
             vec3 p = rayOrigin;
 
             for (int i = 0; i < MAX_STEPS; i++) {
                 vec3 p_prev = p;
 
-                // Check for planet hit first
+                // Opaque planet hit: composite and stop
                 vec4 planetHitColor = getPlanetColor(p);
                 if (planetHitColor.w > 0.5) {
-                    return planetHitColor.rgb;
+            accColor += transmittance * planetHitColor.rgb;
+            return accColor;
                 }
 
-                // Check for event horizon
-                if (length(p) < schwarzschildRadius + EPSILON) {
-                    return vec3(0.0); // Hit the event horizon
+                // Event horizon absorbs remaining light: stop
+                if (length(p) < u_schwarzschildRadius + EPSILON) {
+                    return accColor;
                 }
 
-                // Apply gravitational lensing
-                float distToCenterSq = dot(p, p);
+                // Apply gravitational lensing (curved geodesic approximation)
+                float distToCenterSq = max(dot(p, p), 1e-4);
                 vec3 gravityDir = -normalize(p);
-                vec3 acceleration = gravityDir * (G * M) / distToCenterSq;
-                rayDir += acceleration * STEP_SIZE;
-                rayDir = normalize(rayDir);
+                vec3 acceleration = gravityDir * (G * u_mass) / distToCenterSq;
+                rayDir = normalize(rayDir + acceleration * STEP_SIZE);
                 p += rayDir * STEP_SIZE;
 
-                // Accurate ray-plane intersection test for the accretion disk
+                // Thin-disk intersection via sign change on y
                 if (p_prev.y * p.y < 0.0) {
                     float t = -p_prev.y / (p.y - p_prev.y);
-                    vec3 intersection_point = p_prev + t * (p - p_prev);
-
-                    float dist_to_center = length(intersection_point.xz);
-                    if (dist_to_center > diskInnerRadius && dist_to_center < diskOuterRadius) {
-                        finalColor = getDiskColor(intersection_point);
-                        break; // Intersection found, stop marching.
+                    vec3 hit = p_prev + t * (p - p_prev);
+                    float r = length(hit.xz);
+                    if (r > u_diskInnerRadius && r < u_diskOuterRadius) {
+                        vec4 disk = getDiskSample(hit);
+                        // Front-to-back compositing
+                        accColor += transmittance * disk.rgb;
+                        transmittance *= (1.0 - disk.a);
+                        // Early out if nearly opaque after accumulation
+                        if (transmittance < 0.02) {
+                            return accColor;
+                        }
                     }
                 }
 
                 if (length(p) > MAX_DIST) {
-                    break; // Ray has gone too far.
+                    // Ray escaped scene bounds: composite starfield using bent direction
+                    accColor += transmittance * starField(rayDir, u_time);
+                    return accColor;
                 }
             }
 
-            return finalColor;
+            // If we reached max steps without escaping, add background as well
+            accColor += transmittance * starField(rayDir, u_time);
+            return accColor;
         }
 
         /**
@@ -261,7 +419,7 @@
             const fsSource = document.getElementById('fragment-shader').textContent;
             const shaderProgram = initShaderProgram(gl, vsSource, fsSource);
 
-            const programInfo = {
+        const programInfo = {
                 program: shaderProgram,
                 attribLocations: {
                     vertexPosition: gl.getAttribLocation(shaderProgram, 'a_position'),
@@ -271,6 +429,10 @@
                     time: gl.getUniformLocation(shaderProgram, 'u_time'),
                     invViewMatrix: gl.getUniformLocation(shaderProgram, 'u_invViewMatrix'),
                     cameraPosition: gl.getUniformLocation(shaderProgram, 'u_cameraPosition'),
+            mass: gl.getUniformLocation(shaderProgram, 'u_mass'),
+            schwarzschildRadius: gl.getUniformLocation(shaderProgram, 'u_schwarzschildRadius'),
+            diskInnerRadius: gl.getUniformLocation(shaderProgram, 'u_diskInnerRadius'),
+            diskOuterRadius: gl.getUniformLocation(shaderProgram, 'u_diskOuterRadius'),
                 },
             };
 
@@ -345,12 +507,50 @@
             }, { passive: false });
             canvas.addEventListener('touchend', (e) => { e.preventDefault(); }, { passive: false });
 
+            // --- UI State ---
+            const massSlider = document.getElementById('mass');
+            const massVal = document.getElementById('massVal');
+            const diskSlider = document.getElementById('diskRadius');
+            const diskVal = document.getElementById('diskRadVal');
+            const fpsEl = document.getElementById('fps');
+
+            const params = {
+                mass: parseFloat(massSlider.value),
+                schwarzschild: parseFloat(massSlider.value), // tie Rs to mass in scaled units
+                diskOuter: parseFloat(diskSlider.value),
+            };
+
+            function updateLabels() {
+                massVal.textContent = params.mass.toFixed(2);
+                diskVal.textContent = params.diskOuter.toFixed(1);
+            }
+            updateLabels();
+
+            massSlider.addEventListener('input', () => {
+                params.mass = parseFloat(massSlider.value);
+                params.schwarzschild = params.mass;
+                updateLabels();
+            });
+            diskSlider.addEventListener('input', () => {
+                params.diskOuter = parseFloat(diskSlider.value);
+                updateLabels();
+            });
+
+            // --- FPS ---
             let then = 0;
+            let fpsEMA = 0; // exponential moving average for stability
             function render(now) {
                 now *= 0.001; 
                 const deltaTime = now - then;
                 then = now;
-                drawScene(gl, programInfo, positionBuffer, camera, now);
+                // Update FPS display
+                if (deltaTime > 0) {
+                    const fps = 1.0 / deltaTime;
+                    fpsEMA = fpsEMA ? (fpsEMA * 0.9 + fps * 0.1) : fps; // smooth
+                    fpsEl.textContent = `FPS: ${fpsEMA.toFixed(1)}`;
+                }
+
+                drawScene(gl, programInfo, positionBuffer, camera, now, params);
                 requestAnimationFrame(render);
             }
             requestAnimationFrame(render);
@@ -364,7 +564,7 @@
             return positionBuffer;
         }
 
-        function drawScene(gl, programInfo, buffer, camera, time) {
+    function drawScene(gl, programInfo, buffer, camera, time, params) {
             resizeCanvasToDisplaySize(gl.canvas);
             gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
             gl.clearColor(0.0, 0.0, 0.0, 1.0);
@@ -389,6 +589,12 @@
             gl.uniform1f(programInfo.uniformLocations.time, time);
             gl.uniform3fv(programInfo.uniformLocations.cameraPosition, camera.position);
             gl.uniformMatrix4fv(programInfo.uniformLocations.invViewMatrix, false, invViewMatrix);
+
+            // Runtime-adjustable uniforms
+            gl.uniform1f(programInfo.uniformLocations.mass, params.mass);
+            gl.uniform1f(programInfo.uniformLocations.schwarzschildRadius, params.schwarzschild);
+            gl.uniform1f(programInfo.uniformLocations.diskInnerRadius, 1.5 * params.schwarzschild);
+            gl.uniform1f(programInfo.uniformLocations.diskOuterRadius, params.diskOuter);
 
             gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
         }
