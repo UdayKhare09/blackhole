@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebGL Black Hole Simulator</title>
+    <title>WebGL Black Hole Simulator with Planets</title>
     <style>
         body, html {
             margin: 0;
@@ -24,10 +24,11 @@
             top: 10px;
             left: 10px;
             padding: 10px;
-            background: rgba(0, 0, 0, 0.5);
+            background: rgba(0, 0, 0, 0.6);
             border-radius: 8px;
             font-size: 14px;
-            max-width: 300px;
+            max-width: 320px;
+            z-index: 5;
         }
         a {
             color: #61dafb;
@@ -40,9 +41,9 @@
 <body>
     <div id="info">
         <strong>Black Hole Simulator</strong><br>
-        - Drag the mouse to orbit the camera.<br>
-        - Use the scroll wheel to zoom in and out.<br>
-        <p>This simulation uses ray marching in a fragment shader to render the gravitational lensing effect of a black hole on its accretion disk.</p>
+        - Drag mouse or a single finger to orbit the camera.<br>
+        - Scroll wheel or pinch to zoom.<br>
+        <p>This simulation renders the gravitational lensing of a black hole. It now includes a rocky inner planet and a gas-giant outer planet orbiting the central mass.</p>
     </div>
     <canvas id="glcanvas"></canvas>
 
@@ -60,13 +61,12 @@
 
         uniform vec2 u_resolution;
         uniform float u_time;
-        // This matrix transforms from camera space to world space
         uniform mat4 u_invViewMatrix; 
         uniform vec3 u_cameraPosition;
 
         // --- Constants ---
         const float PI = 3.14159265359;
-        const int MAX_STEPS = 150; 
+        const int MAX_STEPS = 300; // Increased for larger scene
         const float MAX_DIST = 100.0;
         const float STEP_SIZE = 0.25; 
         const float EPSILON = 0.001;
@@ -77,33 +77,74 @@
         // --- Accretion Disk Properties ---
         const float diskInnerRadius = schwarzschildRadius * 1.5;
         const float diskOuterRadius = schwarzschildRadius * 5.0;
-        const float diskHeight = 0.05; // Still used for thickness, but not for main intersection
+        const float diskHeight = 0.05;
+
+        // --- Planet Properties ---
+        const float planet1_orbitRadius = 8.0;
+        const float planet1_radius = 0.4;
+        const float planet1_speed = 0.1;
+        const vec3  planet1_color = vec3(0.8, 0.3, 0.1);
+
+        const float planet2_orbitRadius = 13.0;
+        const float planet2_radius = 1.0;
+        const float planet2_speed = 0.05;
+        const vec3  planet2_color_base = vec3(0.3, 0.4, 0.7);
 
         // --- Physics ---
         const float G = 1.0; 
         const float M = 1.0;
 
-        /**
-         * Simple pseudo-random number generator.
-         */
+        // --- Utility Functions ---
         float random(vec2 st) {
             return fract(sin(dot(st.xy, vec2(12.9898, 78.233))) * 43758.5453123);
         }
 
-        /**
-         * 2D Noise function based on the random generator.
-         */
         float noise(vec2 st) {
             vec2 i = floor(st);
             vec2 f = fract(st);
-
             float a = random(i);
             float b = random(i + vec2(1.0, 0.0));
             float c = random(i + vec2(0.0, 1.0));
             float d = random(i + vec2(1.0, 1.0));
-
             vec2 u = f * f * (3.0 - 2.0 * f);
             return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+        }
+
+        /**
+         * Calculates the color of a planet if the ray hits one.
+         * Returns vec4(color, 1.0) on hit, vec4(0.0) on miss.
+         * The 'w' component is used as a hit flag.
+         */
+        vec4 getPlanetColor(vec3 p) {
+            // Planet 1 (Rocky Planet)
+            float angle1 = u_time * planet1_speed;
+            vec3 planet1_pos = vec3(cos(angle1) * planet1_orbitRadius, 0.0, sin(angle1) * planet1_orbitRadius);
+            
+            if (length(p - planet1_pos) < planet1_radius) {
+                // Simple lighting: brighter on the side facing the center (accretion disk)
+                vec3 normal = normalize(p - planet1_pos);
+                vec3 lightDir = normalize(-planet1_pos); // Light from the center
+                float diffuse = max(0.0, dot(normal, lightDir)) * 0.7 + 0.3;
+                return vec4(planet1_color * diffuse, 1.0);
+            }
+
+            // Planet 2 (Gas Giant)
+            float angle2 = u_time * planet2_speed + 2.5; // Offset start angle
+            vec3 planet2_pos = vec3(cos(angle2) * planet2_orbitRadius, 0.0, sin(angle2) * planet2_orbitRadius);
+
+            if (length(p - planet2_pos) < planet2_radius) {
+                vec3 normal = normalize(p - planet2_pos);
+                vec3 lightDir = normalize(-planet2_pos);
+                float diffuse = max(0.0, dot(normal, lightDir)) * 0.6 + 0.4;
+
+                // Add some noise for texture/bands
+                float n = noise(p.xy * 3.0) * 0.5 + noise(p.yz * 6.0) * 0.5;
+                vec3 texColor = mix(planet2_color_base, vec3(0.9), n);
+
+                return vec4(texColor * diffuse, 1.0);
+            }
+
+            return vec4(0.0); // No hit
         }
 
         /**
@@ -140,7 +181,7 @@
         }
         
         /**
-         * Main ray marching function with accurate ray-plane intersection.
+         * Main ray marching function with planet detection.
          */
         vec3 rayMarch(vec3 rayOrigin, vec3 rayDir) {
             vec3 finalColor = vec3(0.0);
@@ -149,11 +190,18 @@
             for (int i = 0; i < MAX_STEPS; i++) {
                 vec3 p_prev = p;
 
+                // Check for planet hit first
+                vec4 planetHitColor = getPlanetColor(p);
+                if (planetHitColor.w > 0.5) {
+                    return planetHitColor.rgb;
+                }
+
+                // Check for event horizon
                 if (length(p) < schwarzschildRadius + EPSILON) {
                     return vec3(0.0); // Hit the event horizon
                 }
 
-                // --- Gravitational Lensing ---
+                // Apply gravitational lensing
                 float distToCenterSq = dot(p, p);
                 vec3 gravityDir = -normalize(p);
                 vec3 acceleration = gravityDir * (G * M) / distToCenterSq;
@@ -161,14 +209,11 @@
                 rayDir = normalize(rayDir);
                 p += rayDir * STEP_SIZE;
 
-                // --- Accurate Ray-Plane Intersection Test for the Disk ---
-                // Check if the ray segment from p_prev to p crossed the y=0 plane.
+                // Accurate ray-plane intersection test for the accretion disk
                 if (p_prev.y * p.y < 0.0) {
-                    // Find the exact intersection point using linear interpolation.
                     float t = -p_prev.y / (p.y - p_prev.y);
                     vec3 intersection_point = p_prev + t * (p - p_prev);
 
-                    // Now check if this precise point is within the disk's bounds.
                     float dist_to_center = length(intersection_point.xz);
                     if (dist_to_center > diskInnerRadius && dist_to_center < diskOuterRadius) {
                         finalColor = getDiskColor(intersection_point);
@@ -193,8 +238,8 @@
             rayDir = (u_invViewMatrix * vec4(rayDir, 0.0)).xyz;
             vec3 color = rayMarch(u_cameraPosition, rayDir);
             float l = dot(color, vec3(0.21, 0.72, 0.07));
-            color += color * l * 0.3;
-            color = pow(color, vec3(0.4545));
+            color += color * l * 0.3; // Bloom/glow effect
+            color = pow(color, vec3(0.4545)); // Gamma correction
             gl_FragColor = vec4(color, 1.0);
         }
     </script>
@@ -234,47 +279,71 @@
             let camera = {
                 azimuth: 0.5,
                 elevation: 1.5,
-                radius: 12.0,
+                radius: 15.0, // Adjusted initial zoom
                 minRadius: 4.0,
-                maxRadius: 40.0,
+                maxRadius: 50.0, // Increased max zoom
                 target: [0, 0, 0],
-                position: [0, 0, 12]
+                position: [0, 0, 15]
             };
 
-            let mouse = {
-                isDown: false,
-                lastX: 0,
-                lastY: 0
-            };
-
+            // --- Mouse Controls ---
+            let mouse = { isDown: false, lastX: 0, lastY: 0 };
             canvas.addEventListener('mousedown', (e) => {
                 mouse.isDown = true;
                 mouse.lastX = e.clientX;
                 mouse.lastY = e.clientY;
             });
-
-            canvas.addEventListener('mouseup', () => {
-                mouse.isDown = false;
-            });
-
+            canvas.addEventListener('mouseup', () => { mouse.isDown = false; });
             canvas.addEventListener('mousemove', (e) => {
                 if (!mouse.isDown) return;
                 const dx = e.clientX - mouse.lastX;
                 const dy = e.clientY - mouse.lastY;
-
                 camera.azimuth -= dx * 0.005;
                 camera.elevation -= dy * 0.005;
                 camera.elevation = Math.max(0.01, Math.min(Math.PI - 0.01, camera.elevation));
-
                 mouse.lastX = e.clientX;
                 mouse.lastY = e.clientY;
             });
-
             canvas.addEventListener('wheel', (e) => {
                 e.preventDefault();
-                camera.radius += e.deltaY * 0.01;
+                camera.radius += e.deltaY * 0.02;
                 camera.radius = Math.max(camera.minRadius, Math.min(camera.maxRadius, camera.radius));
             }, { passive: false });
+
+            // --- Touch Controls ---
+            let touch = { lastX: 0, lastY: 0, lastPinchDist: 0 };
+            canvas.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                if (e.touches.length === 1) {
+                    touch.lastX = e.touches[0].clientX;
+                    touch.lastY = e.touches[0].clientY;
+                } else if (e.touches.length === 2) {
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    touch.lastPinchDist = Math.sqrt(dx * dx + dy * dy);
+                }
+            }, { passive: false });
+            canvas.addEventListener('touchmove', (e) => {
+                e.preventDefault();
+                if (e.touches.length === 1) {
+                    const dx = e.touches[0].clientX - touch.lastX;
+                    const dy = e.touches[0].clientY - touch.lastY;
+                    camera.azimuth -= dx * 0.005;
+                    camera.elevation -= dy * 0.005;
+                    camera.elevation = Math.max(0.01, Math.min(Math.PI - 0.01, camera.elevation));
+                    touch.lastX = e.touches[0].clientX;
+                    touch.lastY = e.touches[0].clientY;
+                } else if (e.touches.length === 2) {
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    const pinchDist = Math.sqrt(dx * dx + dy * dy);
+                    const deltaDist = pinchDist - touch.lastPinchDist;
+                    camera.radius -= deltaDist * 0.1;
+                    camera.radius = Math.max(camera.minRadius, Math.min(camera.maxRadius, camera.radius));
+                    touch.lastPinchDist = pinchDist;
+                }
+            }, { passive: false });
+            canvas.addEventListener('touchend', (e) => { e.preventDefault(); }, { passive: false });
 
             let then = 0;
             function render(now) {
@@ -370,9 +439,7 @@
                 let eyex = eye[0], eyey = eye[1], eyez = eye[2];
                 let upx = up[0], upy = up[1], upz = up[2];
                 let centerx = center[0], centery = center[1], centerz = center[2];
-                if (Math.abs(eyex - centerx) < 1e-6 && Math.abs(eyey - centery) < 1e-6 && Math.abs(eyez - centerz) < 1e-6) {
-                    return this.identity(out);
-                }
+                if (Math.abs(eyex - centerx) < 1e-6 && Math.abs(eyey - centery) < 1e-6 && Math.abs(eyez - centerz) < 1e-6) { return this.identity(out); }
                 z0 = eyex - centerx; z1 = eyey - centery; z2 = eyez - centerz;
                 len = 1 / Math.sqrt(z0 * z0 + z1 * z1 + z2 * z2);
                 z0 *= len; z1 *= len; z2 *= len;
@@ -399,22 +466,9 @@
                 return out;
             },
             invert: function(out, a) {
-                let a00 = a[0], a01 = a[1], a02 = a[2], a03 = a[3];
-                let a10 = a[4], a11 = a[5], a12 = a[6], a13 = a[7];
-                let a20 = a[8], a21 = a[9], a22 = a[10], a23 = a[11];
-                let a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
-                let b00 = a00 * a11 - a01 * a10;
-                let b01 = a00 * a12 - a02 * a10;
-                let b02 = a00 * a13 - a03 * a10;
-                let b03 = a01 * a12 - a02 * a11;
-                let b04 = a01 * a13 - a03 * a11;
-                let b05 = a02 * a13 - a03 * a12;
-                let b06 = a20 * a31 - a21 * a30;
-                let b07 = a20 * a32 - a22 * a30;
-                let b08 = a20 * a33 - a23 * a30;
-                let b09 = a21 * a32 - a22 * a31;
-                let b10 = a21 * a33 - a23 * a31;
-                let b11 = a22 * a33 - a23 * a32;
+                let a00 = a[0], a01 = a[1], a02 = a[2], a03 = a[3], a10 = a[4], a11 = a[5], a12 = a[6], a13 = a[7], a20 = a[8], a21 = a[9], a22 = a[10], a23 = a[11], a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15];
+                let b00 = a00 * a11 - a01 * a10, b01 = a00 * a12 - a02 * a10, b02 = a00 * a13 - a03 * a10, b03 = a01 * a12 - a02 * a11, b04 = a01 * a13 - a03 * a11, b05 = a02 * a13 - a03 * a12;
+                let b06 = a20 * a31 - a21 * a30, b07 = a20 * a32 - a22 * a30, b08 = a20 * a33 - a23 * a30, b09 = a21 * a32 - a22 * a31, b10 = a21 * a33 - a23 * a31, b11 = a22 * a33 - a23 * a32;
                 let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
                 if (!det) { return null; }
                 det = 1.0 / det;
