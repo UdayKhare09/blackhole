@@ -1,2 +1,8 @@
 .idea
 cpp/build/
+Windows/.vs/
+Windows/Debug/
+Windows/Release/
+Windows/x64/
+Windows/x86/
+Windows/Blackhole/
