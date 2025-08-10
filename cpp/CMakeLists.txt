@@ -19,7 +19,7 @@ add_executable(blackhole ${SOURCES})
 target_include_directories(blackhole PRIVATE
     ${GLFW_INCLUDE_DIRS}
     ${OPENGL_INCLUDE_DIRS}
-    "src/"
+    "src"
 )
 
 # Link libraries
