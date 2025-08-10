@@ -44,8 +44,8 @@ void cursor_position_callback(GLFWwindow* /*window*/, const double xpos, const d
         const double dx = xpos - lastMouseX;
         const double dy = ypos - lastMouseY;
 
-        camera.azimuth -= dx * 0.005f;
-        camera.elevation -= dy * 0.005f;
+        camera.azimuth -= static_cast<float>(dx) * 0.005f;
+        camera.elevation -= static_cast<float>(dy) * 0.005f;
         camera.elevation = std::max(0.01f, std::min(3.13f, camera.elevation));
 
         lastMouseX = xpos;
@@ -54,11 +54,11 @@ void cursor_position_callback(GLFWwindow* /*window*/, const double xpos, const d
 }
 
 void scroll_callback(GLFWwindow* /*window*/, double /*xoffset*/, const double yoffset) {
-    camera.radius += yoffset * 0.5f;
+    camera.radius += static_cast<float>(yoffset) * 0.5f;
     camera.radius = std::max(camera.minRadius, std::min(camera.maxRadius, camera.radius));
 }
 
-void key_callback(GLFWwindow* window, int key, int /*scancode*/, int action, int /*mods*/) {
+void key_callback(GLFWwindow* window, const int key, int /*scancode*/, const int action, int /*mods*/) {
     if (action == GLFW_PRESS || action == GLFW_REPEAT) {
         switch (key) {
             case GLFW_KEY_ESCAPE:
@@ -100,7 +100,7 @@ void updateFPS() {
     const auto currentTime = std::chrono::high_resolution_clock::now();
 
     if (const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - lastFPSTime); duration.count() >= 1000) {
-        fps = frameCount * 1000.0f / duration.count();
+        fps = static_cast<float>(frameCount) / (static_cast<float>(duration.count()) / 1000.0f);
         frameCount = 0;
         lastFPSTime = currentTime;
 
@@ -206,7 +206,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
 
         // Use shader and set uniforms
         blackholeShader.use();
-        blackholeShader.setVec2("u_resolution", width, height);
+        blackholeShader.setVec2("u_resolution", static_cast<float>(width), static_cast<float>(height));
         blackholeShader.setFloat("u_time", time);
         blackholeShader.setMat4("u_invViewMatrix", invViewMatrix.m);
         blackholeShader.setVec3("u_cameraPosition", camera.position.x, camera.position.y, camera.position.z);
