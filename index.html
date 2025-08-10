@@ -45,6 +45,19 @@
         .row input[type="range"] {
             width: 140px;
         }
+        .toggles {
+            display: grid;
+            grid-template-columns: repeat(2, auto);
+            gap: 6px 12px;
+            margin-top: 10px;
+        }
+        .toggles label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            cursor: pointer;
+        }
         #fps {
             margin-top: 8px;
             font-variant-numeric: tabular-nums;
@@ -75,6 +88,12 @@
             <input id="diskRadius" type="range" min="2" max="30" step="0.1" value="8.0" />
             <span id="diskRadVal">8.0</span>
         </div>
+        <div class="toggles">
+            <label><input type="checkbox" id="toggleStarfield" checked /> Starfield</label>
+            <label><input type="checkbox" id="togglePlanets" checked /> Planets</label>
+            <label><input type="checkbox" id="toggleDisk" checked /> Accretion disk</label>
+            <label><input type="checkbox" id="toggleLensing" checked /> Lensing</label>
+        </div>
         <div id="fps">FPS: --</div>
     </div>
     </div>
@@ -100,17 +119,24 @@
     uniform float u_schwarzschildRadius;
     uniform float u_diskInnerRadius;
     uniform float u_diskOuterRadius;
+    uniform int u_enableStarfield; // 1=on, 0=off
+    uniform int u_enablePlanets;   // 1=on, 0=off
+    uniform int u_enableDisk;      // 1=on, 0=off
+    uniform int u_enableLensing;   // 1=on, 0=off
+    // Adaptive marching controls
+    uniform float u_stepSize;       // base step size (scene units)
+    uniform int   u_maxSteps;       // dynamic max steps (<= MAX_STEPS)
+    uniform float u_farDist;        // escape distance
+    uniform float u_lensMaxRadius;  // radius beyond which lensing is negligible
 
         // --- Constants ---
         const float PI = 3.14159265359;
-    const int MAX_STEPS = 300; // Marching steps for larger scene
-        const float MAX_DIST = 100.0;
-        const float STEP_SIZE = 0.25; 
+    const int MAX_STEPS = 300; // Compile-time cap for WebGL; runtime uses u_maxSteps
+        const float MAX_DIST = 100.0; // fallback
         const float EPSILON = 0.001;
 
     // --- Black Hole and Disk Properties (controlled via UI) ---
-    // Use uniforms so they can be adjusted at runtime
-    const float diskHeight = 0.05;
+    // Note: disk modeled as infinitesimally thin (y=0) plane.
 
         // --- Planet Properties ---
     const float planet1_orbitRadius = 18.0;
@@ -157,7 +183,7 @@
             return (sum > 0.0) ? (f / sum) : 0.0;
         }
 
-        vec3 starField(vec3 rd, float t) {
+    vec3 starField(vec3 rd, float t) {
             rd = normalize(rd);
             // Spherical mapping (longitude/latitude)
             float lon = atan(rd.z, rd.x); // -PI..PI
@@ -240,6 +266,9 @@
          * The 'w' component is used as a hit flag.
          */
         vec4 getPlanetColor(vec3 p) {
+            if (u_enablePlanets == 0) {
+                return vec4(0.0);
+            }
             // Planet 1 (Rocky Planet)
             float angle1 = u_time * planet1_speed;
             vec3 planet1_pos = vec3(cos(angle1) * planet1_orbitRadius, 0.0, sin(angle1) * planet1_orbitRadius);
@@ -335,8 +364,10 @@
             vec3 accColor = vec3(0.0); // accumulated color along the ray
             float transmittance = 1.0; // remaining transparency (1 means fully visible background)
             vec3 p = rayOrigin;
+            float farDist = (u_farDist > 0.0) ? u_farDist : MAX_DIST;
 
             for (int i = 0; i < MAX_STEPS; i++) {
+                if (i >= u_maxSteps) break;
                 vec3 p_prev = p;
 
                 // Opaque planet hit: composite and stop
@@ -347,19 +378,31 @@
                 }
 
                 // Event horizon absorbs remaining light: stop
-                if (length(p) < u_schwarzschildRadius + EPSILON) {
-                    return accColor;
+                if (u_enableLensing == 1) {
+                    if (length(p) < u_schwarzschildRadius + EPSILON) {
+                        return accColor;
+                    }
                 }
 
                 // Apply gravitational lensing (curved geodesic approximation)
-                float distToCenterSq = max(dot(p, p), 1e-4);
-                vec3 gravityDir = -normalize(p);
-                vec3 acceleration = gravityDir * (G * u_mass) / distToCenterSq;
-                rayDir = normalize(rayDir + acceleration * STEP_SIZE);
-                p += rayDir * STEP_SIZE;
+                float r = length(p);
+                float distToCenterSq = max(r * r, 1e-4);
+                // Adaptive step: take larger steps far from disk and outside lensing region
+                float step = u_stepSize;
+                // Increase step with distance from center
+                step += step * smoothstep(u_diskOuterRadius + 2.0, farDist, r) * 2.5;
+                // Increase step when far from the disk plane (|y| large)
+                step *= 1.0 + 1.2 * smoothstep(0.5, 3.0, abs(p.y));
+
+                if (u_enableLensing == 1 && r < u_lensMaxRadius) {
+                    vec3 gravityDir = (r > 1e-6) ? -p / r : vec3(0.0, 0.0, 0.0);
+                    vec3 acceleration = gravityDir * (G * u_mass) / distToCenterSq;
+                    rayDir = normalize(rayDir + acceleration * step);
+                }
+                p += rayDir * step;
 
                 // Thin-disk intersection via sign change on y
-                if (p_prev.y * p.y < 0.0) {
+                if (u_enableDisk == 1 && p_prev.y * p.y < 0.0) {
                     float t = -p_prev.y / (p.y - p_prev.y);
                     vec3 hit = p_prev + t * (p - p_prev);
                     float r = length(hit.xz);
@@ -375,15 +418,19 @@
                     }
                 }
 
-                if (length(p) > MAX_DIST) {
+                if (length(p) > farDist) {
                     // Ray escaped scene bounds: composite starfield using bent direction
-                    accColor += transmittance * starField(rayDir, u_time);
+                    if (u_enableStarfield == 1) {
+                        accColor += transmittance * starField(rayDir, u_time);
+                    }
                     return accColor;
                 }
             }
 
             // If we reached max steps without escaping, add background as well
-            accColor += transmittance * starField(rayDir, u_time);
+            if (u_enableStarfield == 1) {
+                accColor += transmittance * starField(rayDir, u_time);
+            }
             return accColor;
         }
 
@@ -394,6 +441,18 @@
             vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution.xy) / u_resolution.y;
             vec3 rayDir = normalize(vec3(uv, -1.0));
             rayDir = (u_invViewMatrix * vec4(rayDir, 0.0)).xyz;
+            // Early-out: starfield only, no marching needed
+            if (u_enableStarfield == 1 && u_enablePlanets == 0 && u_enableDisk == 0 && u_enableLensing == 0) {
+                vec3 bg = starField(rayDir, u_time);
+                bg = pow(bg, vec3(0.4545));
+                gl_FragColor = vec4(bg, 1.0);
+                return;
+            }
+            // If literally everything is off, return black
+            if (u_enableStarfield == 0 && u_enablePlanets == 0 && u_enableDisk == 0 && u_enableLensing == 0) {
+                gl_FragColor = vec4(0.0);
+                return;
+            }
             vec3 color = rayMarch(u_cameraPosition, rayDir);
             float l = dot(color, vec3(0.21, 0.72, 0.07));
             color += color * l * 0.3; // Bloom/glow effect
@@ -433,6 +492,14 @@
             schwarzschildRadius: gl.getUniformLocation(shaderProgram, 'u_schwarzschildRadius'),
             diskInnerRadius: gl.getUniformLocation(shaderProgram, 'u_diskInnerRadius'),
             diskOuterRadius: gl.getUniformLocation(shaderProgram, 'u_diskOuterRadius'),
+            enableStarfield: gl.getUniformLocation(shaderProgram, 'u_enableStarfield'),
+            enablePlanets: gl.getUniformLocation(shaderProgram, 'u_enablePlanets'),
+            enableDisk: gl.getUniformLocation(shaderProgram, 'u_enableDisk'),
+            enableLensing: gl.getUniformLocation(shaderProgram, 'u_enableLensing'),
+            stepSize: gl.getUniformLocation(shaderProgram, 'u_stepSize'),
+            maxSteps: gl.getUniformLocation(shaderProgram, 'u_maxSteps'),
+            farDist: gl.getUniformLocation(shaderProgram, 'u_farDist'),
+            lensMaxRadius: gl.getUniformLocation(shaderProgram, 'u_lensMaxRadius'),
                 },
             };
 
@@ -513,11 +580,19 @@
             const diskSlider = document.getElementById('diskRadius');
             const diskVal = document.getElementById('diskRadVal');
             const fpsEl = document.getElementById('fps');
+            const toggleStarfield = document.getElementById('toggleStarfield');
+            const togglePlanets = document.getElementById('togglePlanets');
+            const toggleDisk = document.getElementById('toggleDisk');
+            const toggleLensing = document.getElementById('toggleLensing');
 
             const params = {
                 mass: parseFloat(massSlider.value),
                 schwarzschild: parseFloat(massSlider.value), // tie Rs to mass in scaled units
                 diskOuter: parseFloat(diskSlider.value),
+                starfieldOn: true,
+                planetsOn: true,
+                diskOn: true,
+                lensingOn: true,
             };
 
             function updateLabels() {
@@ -536,6 +611,19 @@
                 updateLabels();
             });
 
+            toggleStarfield.addEventListener('change', () => {
+                params.starfieldOn = toggleStarfield.checked;
+            });
+            togglePlanets.addEventListener('change', () => {
+                params.planetsOn = togglePlanets.checked;
+            });
+            toggleDisk.addEventListener('change', () => {
+                params.diskOn = toggleDisk.checked;
+            });
+            toggleLensing.addEventListener('change', () => {
+                params.lensingOn = toggleLensing.checked;
+            });
+
             // --- FPS ---
             let then = 0;
             let fpsEMA = 0; // exponential moving average for stability
@@ -550,7 +638,7 @@
                     fpsEl.textContent = `FPS: ${fpsEMA.toFixed(1)}`;
                 }
 
-                drawScene(gl, programInfo, positionBuffer, camera, now, params);
+                drawScene(gl, programInfo, positionBuffer, camera, now, params, fpsEMA);
                 requestAnimationFrame(render);
             }
             requestAnimationFrame(render);
@@ -564,7 +652,7 @@
             return positionBuffer;
         }
 
-    function drawScene(gl, programInfo, buffer, camera, time, params) {
+    function drawScene(gl, programInfo, buffer, camera, time, params, fps) {
             resizeCanvasToDisplaySize(gl.canvas);
             gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
             gl.clearColor(0.0, 0.0, 0.0, 1.0);
@@ -595,6 +683,29 @@
             gl.uniform1f(programInfo.uniformLocations.schwarzschildRadius, params.schwarzschild);
             gl.uniform1f(programInfo.uniformLocations.diskInnerRadius, 1.5 * params.schwarzschild);
             gl.uniform1f(programInfo.uniformLocations.diskOuterRadius, params.diskOuter);
+            gl.uniform1i(programInfo.uniformLocations.enableStarfield, params.starfieldOn ? 1 : 0);
+            gl.uniform1i(programInfo.uniformLocations.enablePlanets, params.planetsOn ? 1 : 0);
+            gl.uniform1i(programInfo.uniformLocations.enableDisk, params.diskOn ? 1 : 0);
+            gl.uniform1i(programInfo.uniformLocations.enableLensing, params.lensingOn ? 1 : 0);
+
+            // Adaptive marching params based on toggles and simple FPS heuristic
+            let baseStep = params.lensingOn ? 0.25 : 0.45;
+            if (!params.diskOn) baseStep *= 1.15;
+            if (!params.planetsOn) baseStep *= 1.15;
+            // If FPS drops, gently increase step to reduce work; if high FPS, nudge down
+            if (fps) {
+                if (fps < 30) baseStep *= 1.2;
+                else if (fps > 55) baseStep *= 0.9;
+            }
+            baseStep = Math.min(Math.max(baseStep, 0.15), 0.8);
+            const maxSteps = params.lensingOn ? 220 : 120;
+            const farDist = 100.0;
+            const lensMaxRadius = params.lensingOn ? (params.diskOuter * 2.0 + 6.0) : 0.0;
+
+            gl.uniform1f(programInfo.uniformLocations.stepSize, baseStep);
+            gl.uniform1i(programInfo.uniformLocations.maxSteps, maxSteps);
+            gl.uniform1f(programInfo.uniformLocations.farDist, farDist);
+            gl.uniform1f(programInfo.uniformLocations.lensMaxRadius, lensMaxRadius);
 
             gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
         }
