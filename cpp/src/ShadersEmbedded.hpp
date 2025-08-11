@@ -1,3 +1,18 @@
+#pragma once
+
+// Embedded GLSL shader sources
+
+static auto BLACKHOLE_VERT_SRC = R"glsl(
+#version 330 core
+
+layout (location = 0) in vec2 a_position;
+
+void main() {
+    gl_Position = vec4(a_position, 0.0, 1.0);
+}
+)glsl";
+
+static auto BLACKHOLE_FRAG_SRC = R"glsl(
 #version 330 core
 
 out vec4 FragColor;
@@ -303,3 +318,5 @@ void main() {
     color = pow(color, vec3(0.4545));
     FragColor = vec4(color, 1.0);
 }
+)glsl";
+

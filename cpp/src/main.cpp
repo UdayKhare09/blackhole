@@ -5,6 +5,7 @@
 #include <algorithm>
 #include "Shader.hpp"
 #include "Math.hpp"
+#include "ShadersEmbedded.hpp"
 
 // Global state
 Camera camera;
@@ -154,7 +155,7 @@ int main(int /*argc*/, char* /*argv*/[]) {
     glfwSwapInterval(1);
 
     // Load shaders
-    const Shader blackholeShader("shaders/blackhole.vert", "shaders/blackhole.frag");
+    const Shader blackholeShader(BLACKHOLE_VERT_SRC, BLACKHOLE_FRAG_SRC);
 
     // Create fullscreen quad VAO
     unsigned int VAO, VBO;
